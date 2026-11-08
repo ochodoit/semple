@@ -116,7 +116,30 @@ function bindUI() {
 
   window.addEventListener('resize', layout);
   if (screen.orientation?.addEventListener) screen.orientation.addEventListener('change', () => setTimeout(layout, 200));
-  document.addEventListener('visibilitychange', () => { if (document.hidden && game.running) { game.stop('manual'); } });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (game.running) game.stop('manual'); app.wasHidden = true; }
+    else if (app.wasHidden) { app.wasHidden = false; app.lastLoop = 0; toast('화면이 가려져 있는 동안 추적이 멈췄습니다. 앱을 항상 전면에 두세요.'); }
+  });
+  // 키보드(외장 키보드/TV·PC에서 사용): Space·Enter 시작/중지, R 초기화, F 전체화면, M 모드, D 디버그
+  document.addEventListener('keydown', (e) => {
+    if (!app.started || e.target.matches('input, select, textarea')) return;
+    switch (e.key) {
+      case ' ': case 'Enter': e.preventDefault(); closeAllPanels(); toggleRun(); break;
+      case 'r': case 'R': if (game.running) game.stop('manual'); game.resetState(); closeAllPanels(); updateHud(); toast('초기화'); break;
+      case 'f': case 'F': toggleFullscreen(); break;
+      case 'm': case 'M': renderModeList(); open(els.panelMode); break;
+      case 'd': case 'D': settings.debug = !settings.debug; $('#set-debug').checked = settings.debug; els.debug.classList.toggle('hidden', !settings.debug); persist(); break;
+      case 'Escape': closeAllPanels(); break;
+    }
+  });
+}
+
+function closeAllPanels() { $$('.modal').forEach(close); }
+
+function toggleFullscreen() {
+  const doc = document;
+  if (!doc.fullscreenElement && doc.documentElement.requestFullscreen) doc.documentElement.requestFullscreen().catch(() => {});
+  else if (doc.exitFullscreen) doc.exitFullscreen().catch(() => {});
 }
 
 // =============== 카메라 ===============
@@ -145,6 +168,10 @@ async function startCamera() {
 
 async function startStream() {
   const { width, height } = await camera.start(settings.cameraId);
+  const track = camera.stream.getVideoTracks()[0];
+  track.addEventListener('ended', () => { app.cameraLost = true; toast('카메라 연결이 끊겼습니다. 설정에서 카메라를 다시 선택하세요.', 6000); if (game.running) game.stop('manual'); });
+  app.cameraLost = false;
+  app.lastFrameAt = performance.now();
   vision.setSourceSize(width, height);
   els.view.style.aspectRatio = `${width} / ${height}`;
   vision.floorAuto = null;
@@ -188,6 +215,8 @@ function loop(now) {
   let result = app.lastVision;
   if (video.currentTime !== app.lastVideoTime) {
     app.lastVideoTime = video.currentTime;
+    app.lastFrameAt = now;
+    if (app.frozenWarned) { app.frozenWarned = false; toast('카메라 영상이 다시 들어옵니다'); }
     result = vision.process(video, settings);
     app.lastVision = result;
     app.frames++;
@@ -203,6 +232,12 @@ function loop(now) {
     tracker.update(meas, now);
   }
   if (!result) return;
+  // 영상이 2초 넘게 멈추면 경고 (카메라 점유·절전 등)
+  if (!app.frozenWarned && !app.cameraLost && now - app.lastFrameAt > 2000) {
+    app.frozenWarned = true;
+    toast('카메라 영상이 멈췄습니다. 다른 앱이 카메라를 쓰고 있거나 화면이 가려졌을 수 있습니다.', 5000);
+    if (game.running) game.stop('manual');
+  }
 
   const dt = app.lastLoop ? Math.min(0.1, (now - app.lastLoop) / 1000) : 1 / 60;
   app.lastLoop = now;
@@ -239,7 +274,7 @@ function updateChips(result) {
   setChip(els.chipPuck, tracker.state === 'tracked' ? 'ok' : tracker.state === 'predicted' ? 'warn' : 'bad', '퍽');
   if (settings.stickModel) setChip(els.chipStick, result.stick ? 'ok' : 'bad', '스틱');
   else setChip(els.chipStick, '', '스틱(미지정)');
-  els.chipFps.textContent = `${app.fps} fps`;
+  els.chipFps.textContent = app.frozenWarned || app.cameraLost ? '영상 없음' : `${app.fps} fps`;
 }
 
 function setChip(el, state, label) {
@@ -402,7 +437,8 @@ function onViewTap(e) {
     return;
   }
   const model = { r: sample.r, g: sample.g, b: sample.b, area: Math.max(4, Math.min(3000, sample.area)) };
-  if (target === 'puck') settings.puckModel = model; else settings.stickModel = model;
+  if (target === 'puck') { settings.puckModel = model; vision.seedPuck(px, py, model.area); tracker.reset(); }
+  else settings.stickModel = model;
   persist(); refreshCalibUI();
   toast(`${target === 'puck' ? '퍽' : '스틱'} 색 지정 완료 (rgb ${model.r},${model.g},${model.b}, 크기 ${model.area}px)`);
 }

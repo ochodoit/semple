@@ -16,7 +16,7 @@ export class Vision {
     this.floorAuto = null;      // EMA 적용된 자동 바닥 bbox {x0,y0,x1,y1}
     this.floorLocked = false;
     this.floorPolygon = [];     // 자동 감지 윤곽 (표시용)
-    this.lastPuck = null;       // 이전 프레임 퍽 위치 (proc px) - 추적 게이트
+    this.lastPuck = null;       // {x,y,area,vx,vy,missed} 추적 게이트 (proc px)
     this.lastStick = null;
     this.debugImage = null;
     this._alloc();
@@ -118,8 +118,8 @@ export class Vision {
     const bounds = quadBounds(quad);
     const scan = quadScanlines(quad, PH);
     const pm = settings.puckModel, sm = settings.stickModel;
-    const pTol2 = settings.puckTol * settings.puckTol;
-    const sTol2 = settings.stickTol * settings.stickTol;
+    const pMatch = makeMatcher(pm, settings.puckTol);
+    const sMatch = sm ? makeMatcher(sm, settings.stickTol) : null;
     const puckMask = this.puckMask, stickMask = this.stickMask;
     puckMask.fill(0);
     if (sm) stickMask.fill(0);
@@ -130,54 +130,18 @@ export class Vision {
       const xEnd = Math.min(PW - 1, xb);
       for (let x = xa, i = y * PW + xa, p = i * 4; x <= xEnd; x++, i++, p += 4) {
         const r = d[p], g = d[p + 1], b = d[p + 2];
-        let dr = r - pm.r, dg = g - pm.g, db = b - pm.b;
-        if (dr * dr + dg * dg + db * db <= pTol2) puckMask[i] = 1;
-        if (sm) {
-          dr = r - sm.r; dg = g - sm.g; db = b - sm.b;
-          if (dr * dr + dg * dg + db * db <= sTol2) stickMask[i] = 1;
-        }
+        if (matchPixel(pMatch, r, g, b)) puckMask[i] = 1;
+        if (sMatch && matchPixel(sMatch, r, g, b)) stickMask[i] = 1;
       }
     }
 
     const floorW = Math.max(10, bounds.x1 - bounds.x0);
 
-    // ---- 4) 퍽 블롭 선택 ----
-    const calibrated = pm.area > 0;
-    const expArea = calibrated ? pm.area : Math.max(6, 0.785 * Math.pow(floorW * 0.03, 2));
-    // 보정된 경우 크기 범위를 좁혀 신발·바지 등 큰 어두운 물체를 배제
-    const minA = Math.max(3, expArea * 0.25), maxA = expArea * (calibrated ? 3 : 4.5);
-    const areaScale = calibrated ? 1.5 : 2.2;
-    const comps = this._components(puckMask, bounds, Math.max(2, Math.floor(minA * 0.6)));
-    let best = null, bestScore = 0;
-    for (const c of comps) {
-      if (c.area < minA || c.area > maxA) continue;
-      const bw = c.maxx - c.minx + 1, bh = c.maxy - c.miny + 1;
-      const fill = Math.min(1, c.area / (bw * bh));
-      const aspect = Math.min(bw, bh) / Math.max(bw, bh);
-      const cx = c.sx / c.area, cy = c.sy / c.area;
-      let prox = 1;
-      if (this.lastPuck) {
-        const dx = cx - this.lastPuck.x, dy = cy - this.lastPuck.y;
-        prox = Math.exp(-Math.sqrt(dx * dx + dy * dy) / (0.12 * PW));
-      }
-      const areaFit = 1 - Math.min(1, Math.abs(Math.log(c.area / expArea)) / areaScale);
-      const score = fill * (0.5 + 0.5 * aspect) * (0.35 + 0.65 * prox) * (0.3 + 0.7 * areaFit);
-      c.cx = cx; c.cy = cy; c.score = score;
-      result.puckCandidates.push(c);
-      if (score > bestScore) { bestScore = score; best = c; }
-    }
-    if (best && bestScore >= 0.18) {
-      result.puck = { x: best.cx, y: best.cy, area: best.area, w: best.maxx - best.minx + 1, h: best.maxy - best.miny + 1, score: bestScore };
-      this.lastPuck = { x: best.cx, y: best.cy };
-    } else {
-      this.lastPuck = null;
-    }
-
-    // ---- 5) 스틱 블롭 선택 ----
+    // ---- 4) 스틱 블롭 선택 (퍽보다 먼저: 타격 시 탐색 범위 확대에 사용) ----
     if (sm) {
-      const expS = sm.area > 0 ? sm.area : expArea * 3;
+      const expS = sm.area > 0 ? sm.area : Math.max(20, 0.785 * Math.pow(floorW * 0.05, 2));
       const minS = Math.max(5, expS * 0.2);
-      const scomps = this._components(stickMask, bounds, Math.max(3, Math.floor(minS * 0.5)));
+      const scomps = mergeClose(this._components(stickMask, bounds, Math.max(3, Math.floor(minS * 0.5))), 2);
       let sbest = null, sbestScore = 0;
       for (const c of scomps) {
         if (c.area < minS) continue;
@@ -200,6 +164,65 @@ export class Vision {
       } else {
         this.lastStick = null;
       }
+    }
+
+    // ---- 5) 퍽 블롭 선택 ----
+    const calibrated = pm.area > 0;
+    const expArea = calibrated ? pm.area : Math.max(6, 0.785 * Math.pow(floorW * 0.03, 2));
+    // 보정된 경우 크기 범위를 좁혀 신발·바지 등 큰 어두운 물체를 배제
+    const minA = Math.max(3, expArea * 0.25), maxA = expArea * (calibrated ? 3 : 4.5);
+    const areaScale = calibrated ? 1.5 : 2.2;
+    const comps = mergeClose(this._components(puckMask, bounds, Math.max(2, Math.floor(minA * 0.6))), 2);
+
+    // 추적 게이트: 예측 위치 + 탐색 반경. 스틱이 퍽 근처면(타격 직후) 반경 확대
+    const last = this.lastPuck;
+    let predX = 0, predY = 0, sigma = 0.12 * PW, reacquiring = false;
+    if (last) {
+      reacquiring = last.missed > 0;
+      const k = Math.min(last.missed, 6);
+      predX = last.x + last.vx * (1 + k) * 0.8;
+      predY = last.y + last.vy * (1 + k) * 0.8;
+      const speed = Math.hypot(last.vx, last.vy);
+      const stickNear = result.stick && Math.hypot(result.stick.x - last.x, result.stick.y - last.y) < 0.18 * PW;
+      if (stickNear || speed > 0.025 * PW) sigma *= 2.4;
+      sigma *= 1 + 0.25 * k;
+    }
+
+    let best = null, bestScore = 0;
+    for (const c of comps) {
+      if (c.area < minA || c.area > maxA) continue;
+      // 놓친 뒤 재획득: 마지막으로 본 퍽과 크기가 비슷한 것만 허용
+      if (last && reacquiring) {
+        const ratio = c.area / last.area;
+        if (ratio < 0.4 || ratio > 2.5) continue;
+      }
+      const bw = c.maxx - c.minx + 1, bh = c.maxy - c.miny + 1;
+      const fill = Math.min(1, c.area / (bw * bh));
+      const aspect = Math.min(bw, bh) / Math.max(bw, bh);
+      const cx = c.sx / c.area, cy = c.sy / c.area;
+      let prox = 1;
+      if (last) {
+        const dx = cx - predX, dy = cy - predY;
+        prox = Math.exp(-Math.sqrt(dx * dx + dy * dy) / sigma);
+      }
+      const areaFit = 1 - Math.min(1, Math.abs(Math.log(c.area / expArea)) / areaScale);
+      const score = fill * (0.5 + 0.5 * aspect) * (0.35 + 0.65 * prox) * (0.3 + 0.7 * areaFit);
+      c.cx = cx; c.cy = cy; c.score = score;
+      result.puckCandidates.push(c);
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    if (best && bestScore >= 0.18) {
+      result.puck = { x: best.cx, y: best.cy, area: best.area, w: best.maxx - best.minx + 1, h: best.maxy - best.miny + 1, score: bestScore };
+      if (last && last.missed === 0) {
+        const vx = best.cx - last.x, vy = best.cy - last.y;
+        this.lastPuck = { x: best.cx, y: best.cy, area: last.area + (best.area - last.area) * 0.3, vx: last.vx + (vx - last.vx) * 0.6, vy: last.vy + (vy - last.vy) * 0.6, missed: 0 };
+      } else {
+        this.lastPuck = { x: best.cx, y: best.cy, area: best.area, vx: 0, vy: 0, missed: 0 };
+      }
+    } else if (last) {
+      last.missed++;
+      last.vx *= 0.8; last.vy *= 0.8;
+      if (last.missed > 15) this.lastPuck = null;
     }
 
     if (settings.debug) this._buildDebug(sm);
@@ -318,6 +341,11 @@ export class Vision {
     return { r, g, b, area };
   }
 
+  /** 보정 터치 위치를 추적 시작점으로 사용 (같은 색의 다른 물체에 처음부터 붙는 것을 방지) */
+  seedPuck(px, py, area) {
+    this.lastPuck = { x: px, y: py, area: Math.max(3, area), vx: 0, vy: 0, missed: 0 };
+  }
+
   /** 색이 바닥(흰색)과 구분되는지 */
   isFloorLike(model, settings) {
     const mx = Math.max(model.r, model.g, model.b), mn = Math.min(model.r, model.g, model.b);
@@ -338,4 +366,63 @@ export class Vision {
       o[p] = r; o[p + 1] = g; o[p + 2] = b; o[p + 3] = a;
     }
   }
+}
+
+/**
+ * 색 매처 생성. 채도가 높은 색(주황·파랑 테이프 등)은 조명 밝기에 따라 RGB가 크게 변하므로
+ * 정규화 색도(r/(r+g+b), g/(r+g+b))로 비교해 허용 폭을 넓힌다. 어두운 색(검정 퍽)은 RGB 거리 사용.
+ */
+export function makeMatcher(model, tol) {
+  const { r, g, b } = model;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const sat = mx > 0 ? (mx - mn) / mx : 0;
+  if (sat > 0.35 && mx > 60) {
+    const sum = r + g + b;
+    const tolC = tol * 0.6;
+    return {
+      chroma: true,
+      nr: (r / sum) * 255, ng: (g / sum) * 255,
+      tol2: tolC * tolC,
+      minV: Math.max(35, mx * 0.3),
+      minChroma: Math.max(12, (mx - mn) * 0.4),
+    };
+  }
+  return { chroma: false, r, g, b, tol2: tol * tol };
+}
+
+export function matchPixel(m, r, g, b) {
+  if (!m.chroma) {
+    const dr = r - m.r, dg = g - m.g, db = b - m.b;
+    return dr * dr + dg * dg + db * db <= m.tol2;
+  }
+  const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+  if (mx < m.minV || (mx - mn) < m.minChroma) return false;
+  const sum = r + g + b;
+  const dr = (r / sum) * 255 - m.nr, dg = (g / sum) * 255 - m.ng;
+  return dr * dr + dg * dg <= m.tol2;
+}
+
+/** 반사광 등으로 조각난 덩어리 병합: bbox 간격이 gap 이하인 컴포넌트를 합침 */
+export function mergeClose(comps, gap) {
+  if (comps.length < 2 || comps.length > 40) return comps;
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer: for (let i = 0; i < comps.length; i++) {
+      for (let j = i + 1; j < comps.length; j++) {
+        const a = comps[i], c = comps[j];
+        if (a.minx > c.maxx + gap || c.minx > a.maxx + gap || a.miny > c.maxy + gap || c.miny > a.maxy + gap) continue;
+        a.area += c.area; a.sx += c.sx; a.sy += c.sy;
+        a.minx = Math.min(a.minx, c.minx); a.maxx = Math.max(a.maxx, c.maxx);
+        a.miny = Math.min(a.miny, c.miny);
+        if (c.maxy > a.maxy) { a.maxy = c.maxy; a.bxsum = c.bxsum; a.bxn = c.bxn; }
+        else if (c.maxy === a.maxy) { a.bxsum += c.bxsum; a.bxn += c.bxn; }
+        comps.splice(j, 1);
+        merged = true;
+        break outer;
+      }
+    }
+  }
+  return comps;
 }

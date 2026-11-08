@@ -24,10 +24,36 @@ export function loadSettings() {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return structuredClone(DEFAULT_SETTINGS);
-    return { ...structuredClone(DEFAULT_SETTINGS), ...JSON.parse(raw) };
+    return sanitizeSettings({ ...structuredClone(DEFAULT_SETTINGS), ...JSON.parse(raw) });
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
   }
+}
+
+const num = (v, min, max, def) => (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : def);
+const isColorModel = (m) => m && typeof m === 'object' && [m.r, m.g, m.b].every((c) => Number.isFinite(c) && c >= 0 && c <= 255) && Number.isFinite(m.area) && m.area >= 0;
+
+/** 손상되거나 범위를 벗어난 저장값을 기본값으로 되돌림 (오래된 버전/수동 편집 대비) */
+export function sanitizeSettings(s) {
+  const d = DEFAULT_SETTINGS;
+  s.mirror = typeof s.mirror === 'boolean' ? s.mirror : d.mirror;
+  s.debug = typeof s.debug === 'boolean' ? s.debug : d.debug;
+  s.sound = typeof s.sound === 'boolean' ? s.sound : d.sound;
+  s.whiteV = num(s.whiteV, 80, 240, d.whiteV);
+  s.whiteC = num(s.whiteC, 10, 120, d.whiteC);
+  s.puckTol = num(s.puckTol, 20, 200, d.puckTol);
+  s.stickTol = num(s.stickTol, 20, 200, d.stickTol);
+  s.puckModel = isColorModel(s.puckModel) ? { r: s.puckModel.r, g: s.puckModel.g, b: s.puckModel.b, area: s.puckModel.area } : structuredClone(d.puckModel);
+  s.stickModel = isColorModel(s.stickModel) ? { r: s.stickModel.r, g: s.stickModel.g, b: s.stickModel.b, area: s.stickModel.area } : null;
+  s.floorMode = s.floorMode === 'manual' ? 'manual' : 'auto';
+  const quadOk = Array.isArray(s.manualQuad) && s.manualQuad.length === 4 &&
+    s.manualQuad.every((pt) => Array.isArray(pt) && pt.length === 2 && pt.every((c) => Number.isFinite(c) && c >= 0 && c <= 1));
+  if (!quadOk) { s.manualQuad = null; if (s.floorMode === 'manual') s.floorMode = 'auto'; }
+  s.difficulty = ['easy', 'normal', 'hard'].includes(s.difficulty) ? s.difficulty : d.difficulty;
+  s.cameraId = typeof s.cameraId === 'string' ? s.cameraId : '';
+  s.p1 = typeof s.p1 === 'string' && s.p1.trim() ? s.p1.slice(0, 10) : d.p1;
+  s.p2 = typeof s.p2 === 'string' && s.p2.trim() ? s.p2.slice(0, 10) : d.p2;
+  return s;
 }
 
 export function saveSettings(settings) {

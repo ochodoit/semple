@@ -6,23 +6,29 @@
   import { Vision } from '../src/vision.js';
   import { Tracker } from '../src/tracker.js';
   import { Game } from '../src/game.js';
+  import { sanitizeSettings, DEFAULT_SETTINGS } from '../src/storage.js';
 
   const scene = document.getElementById('scene');
   const sctx = scene.getContext('2d');
 
   // 합성 장면: 회색 배경 + 흰 바닥 사각형(원근) + 검정 퍽 + 주황 스틱 블레이드 + 어두운 신발(노이즈)
-  function drawScene({ puck, stick, shoe }) {
+  function drawScene({ puck, stick, shoe, distractor, stickShade = 1, glare = false }) {
     sctx.fillStyle = '#6b7280'; sctx.fillRect(0, 0, 640, 480);
     sctx.fillStyle = '#f3f4f6';
     sctx.beginPath(); sctx.moveTo(120, 120); sctx.lineTo(520, 120); sctx.lineTo(600, 440); sctx.lineTo(40, 440); sctx.closePath(); sctx.fill();
     // 바닥 음영
     sctx.fillStyle = 'rgba(0,0,0,0.08)'; sctx.fillRect(40, 300, 560, 140);
     if (shoe) { sctx.fillStyle = '#1f2937'; sctx.fillRect(shoe.x, shoe.y, 60, 28); }
+    if (distractor) { sctx.fillStyle = '#111827'; sctx.beginPath(); sctx.ellipse(distractor.x, distractor.y, distractor.rx || 14, distractor.ry || 9, 0, 0, Math.PI * 2); sctx.fill(); }
     if (stick) {
-      sctx.strokeStyle = '#f97316'; sctx.lineWidth = 10; sctx.lineCap = 'round';
+      const sh = Math.round(249 * stickShade), sg = Math.round(115 * stickShade), sb = Math.round(22 * stickShade);
+      sctx.strokeStyle = `rgb(${sh},${sg},${sb})`; sctx.lineWidth = 10; sctx.lineCap = 'round';
       sctx.beginPath(); sctx.moveTo(stick.x, stick.y); sctx.lineTo(stick.x + 40, stick.y - 6); sctx.stroke();
     }
-    if (puck) { sctx.fillStyle = '#111827'; sctx.beginPath(); sctx.ellipse(puck.x, puck.y, 14, 9, 0, 0, Math.PI * 2); sctx.fill(); }
+    if (puck) {
+      sctx.fillStyle = '#111827'; sctx.beginPath(); sctx.ellipse(puck.x, puck.y, 14, 9, 0, 0, Math.PI * 2); sctx.fill();
+      if (glare) { sctx.fillStyle = '#e5e7eb'; sctx.fillRect(puck.x - 1, puck.y - 10, 3, 20); } // 반사광으로 퍽이 둘로 갈라짐
+    }
   }
 
   const settings = {
@@ -98,7 +104,7 @@
     check('wide drill counts reps', game.stats.reps >= 6, game.stats);
     check('timer runs down', game.timeLeft < 30 && game.timeLeft > 20, game.timeLeft);
     const result = game.stop('manual');
-    check('result built', result && result.items.length === 2, result && result.items);
+    check('result built', result && result.items.length >= 2, result && result.items);
 
     // 7) 장애물 모드: 타겟 위치로 퍽 이동 시 점수 증가, 콘 충돌 시 생명 감소
     game.setMode('obstacle');
@@ -127,6 +133,82 @@
     const [u, v] = r.floor.mapping.toUV(r.puck.x, r.puck.y);
     const [bx, by] = r.floor.mapping.toPx(u, v);
     check('homography roundtrip', Math.abs(bx - r.puck.x) < 1e-6 && Math.abs(by - r.puck.y) < 1e-6);
+
+    // ===== 회귀: 이전 프로젝트 리뷰에서 확인된 시나리오 =====
+    settings.floorMode = 'auto'; settings.manualQuad = null; vision.mirror = false;
+    vision.lastPuck = null; vision.lastStick = null; vision.floorAuto = null; vision.floorLocked = false;
+    for (let i = 0; i < 12; i++) { drawScene({ puck: { x: 300, y: 300 } }); r = vision.process(scene, settings); }
+
+    // R1) 같은 색·같은 크기의 방해물이 바닥 안 먼 곳에 나타나도 추적 중인 퍽을 유지
+    for (let i = 0; i < 5; i++) { drawScene({ puck: { x: 300 + i * 3, y: 300 }, distractor: { x: 500, y: 380 } }); r = vision.process(scene, settings); }
+    check('R1 keeps tracked puck over same-color distractor', r.puck && Math.abs(r.puck.x - 312 * 0.375) < 2, { puck: r.puck && [r.puck.x, r.puck.y], cands: r.puckCandidates.length });
+
+    // R2) 보정 터치 시드: 방해물이 더 커도 터치한 위치의 덩어리를 잡음
+    vision.lastPuck = null;
+    drawScene({ puck: { x: 300, y: 300 }, distractor: { x: 480, y: 380, rx: 18, ry: 12 } });
+    r = vision.process(scene, settings);
+    vision.seedPuck(300 * 0.375, 300 * 0.375, 54);
+    r = vision.process(scene, settings);
+    check('R2 seed from calibration tap picks tapped blob', r.puck && Math.abs(r.puck.x - 300 * 0.375) < 2, r.puck && [r.puck.x, r.puck.y]);
+
+    // R3) 강타: 스틱이 퍽 옆에 있을 때 한 프레임에 45px(proc) 점프해도 놓치지 않음
+    settings.stickModel = { r: 244, g: 142, b: 71, area: 67 };
+    for (let i = 0; i < 4; i++) { drawScene({ puck: { x: 300, y: 300 }, stick: { x: 316, y: 304 } }); r = vision.process(scene, settings); }
+    check('R3 setup: stick near puck', !!r.stick && !!r.puck);
+    drawScene({ puck: { x: 420, y: 300 }, stick: { x: 316, y: 304 } }); // 120px(원본) = 45px(proc) 점프
+    r = vision.process(scene, settings);
+    check('R3 hard shot still tracked (wide gate near stick)', r.puck && Math.abs(r.puck.x - 420 * 0.375) < 2, r.puck && [r.puck.x, r.puck.y, r.puck.score]);
+    drawScene({ puck: { x: 520, y: 300 }, stick: { x: 316, y: 304 } }); // 속도 예측으로 계속 추적
+    r = vision.process(scene, settings);
+    check('R3 velocity prediction follows fast puck', r.puck && Math.abs(r.puck.x - 520 * 0.375) < 2, r.puck && [r.puck.x, r.puck.y, r.puck.score]);
+
+    // R4) 놓친 뒤 재획득: 크기가 2.7배인 어두운 물체는 거부, 진짜 퍽이 다시 보이면 수용
+    for (let i = 0; i < 4; i++) { drawScene({ puck: { x: 300, y: 320 } }); r = vision.process(scene, settings); }
+    for (let i = 0; i < 3; i++) { drawScene({ puck: null }); r = vision.process(scene, settings); }
+    check('R4 puck lost', !r.puck && vision.lastPuck && vision.lastPuck.missed === 3);
+    drawScene({ puck: null, distractor: { x: 330, y: 330, rx: 23, ry: 15 } });
+    r = vision.process(scene, settings);
+    check('R4 reacquire rejects wrong-size blob', !r.puck, r.puck);
+    drawScene({ puck: { x: 310, y: 325 } });
+    r = vision.process(scene, settings);
+    check('R4 reacquire accepts real puck', r.puck && Math.abs(r.puck.x - 310 * 0.375) < 2, r.puck && [r.puck.x, r.puck.y]);
+
+    // R5) 조명이 어두워져 스틱 테이프 RGB가 60%로 떨어져도(색도 비교) 계속 인식
+    drawScene({ puck: { x: 300, y: 320 }, stick: { x: 340, y: 300 }, stickShade: 0.6 });
+    r = vision.process(scene, settings);
+    check('R5 stick detected under dim light (chroma match)', r.stick && Math.abs(r.stick.x - 360 * 0.375) < 4, r.stick && [r.stick.x, r.stick.y]);
+    drawScene({ puck: { x: 300, y: 320 }, stick: null, shoe: { x: 330, y: 290 } }); // 어두운 회색 물체는 스틱으로 안 잡힘
+    r = vision.process(scene, settings);
+    check('R5 gray object not matched as stick', !r.stick, r.stick);
+
+    // R6) 반사광으로 퍽 마스크가 둘로 갈라져도 하나로 병합
+    for (let i = 0; i < 3; i++) { drawScene({ puck: { x: 300, y: 320 }, glare: true }); r = vision.process(scene, settings); }
+    check('R6 glare-split puck merged', r.puck && r.puck.area > 35 && Math.abs(r.puck.x - 300 * 0.375) < 2, r.puck && [r.puck.x, r.puck.area]);
+
+    // R7) 반응 모드: 반응 시간(첫 움직임)과 이동 시간 분리, 타겟은 일정 거리 범위
+    const g2 = new Game(null); g2.setMode('reaction');
+    const tr2 = new Tracker(); tr2.pos = { x: 0.5, y: 0.5 }; tr2.state = 'tracked'; tr2.speed = 0; tr2.frames = 10; tr2.trackedFrames = 9;
+    let t2 = 5000; g2.start(tr2);
+    const tg = g2.targets[0];
+    const dd = Math.hypot(tg.x - 0.5, tg.y - 0.5);
+    check('R7 target within distance band', dd >= 0.3 && dd <= 0.5, dd);
+    for (let i = 0; i < 15; i++) { g2.update(0.033, tr2, t2); t2 += 33; } // 0.5초 정지 (반응 중)
+    tr2.speed = 1.0; g2.update(0.033, tr2, t2); t2 += 33;   // 움직이기 시작
+    for (let i = 0; i < 30; i++) { g2.update(0.033, tr2, t2); t2 += 33; } // 1초 이동
+    tr2.pos = { x: tg.x, y: tg.y }; g2.update(0.033, tr2, t2); t2 += 33;
+    check('R7 reaction excludes travel time', g2.stats.times.length === 1 && g2.stats.times[0] > 0.45 && g2.stats.times[0] < 0.6 && g2.stats.travel[0] > 0.9, g2.stats);
+    const res2 = g2.stop('manual');
+    check('R7 result includes track rate', res2.items.some(([k]) => k === '퍽 추적률'), res2.items);
+
+    // R8) 콘이 가장자리에도 생성됨 (안전지대 제거)
+    let edge = 0;
+    for (let i = 0; i < 40; i++) { const g3 = new Game(null); g3.setMode('obstacle'); g3.difficulty = 'hard'; g3.start({ pos: { x: 0.5, y: 0.5 } }); if (g3.cones.some((c) => c.x < 0.1 || c.x > 0.9 || c.y < 0.12 || c.y > 0.88)) edge++; }
+    check('R8 cones can spawn near edges', edge > 10, edge);
+
+    // R9) 손상된 저장값 검증
+    const bad = sanitizeSettings({ ...structuredClone(DEFAULT_SETTINGS), whiteV: 'x', puckTol: 9999, puckModel: { r: -1 }, stickModel: 'orange', floorMode: 'manual', manualQuad: [[0, 0], [2, 0]], difficulty: 'nightmare', p1: '' });
+    check('R9 sanitize restores defaults', bad.whiteV === 150 && bad.puckTol === 95 && bad.puckModel.r === 0 && bad.stickModel === null && bad.floorMode === 'auto' && bad.manualQuad === null && bad.difficulty === 'normal' && bad.p1 === '플레이어 1', bad);
+    settings.stickModel = null;
 
     // 9) 성능: 240x180 프레임 처리 시간
     settings.debug = true;

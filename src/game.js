@@ -63,6 +63,7 @@ export class Game {
 
   start(puck) {
     this.resetState();
+    this.tracker = puck;
     this.running = true;
     this.startedAt = performance.now();
     const d = DIFF[this.difficulty] || DIFF.normal;
@@ -101,10 +102,9 @@ export class Game {
         this.instruction = '박스 안에서 빠르게 좌우로!';
         break;
       case 'reaction':
-        this.stats = { hits: 0, times: [] };
-        this._spawnTarget(p, 0.3);
-        this.targets[0].spawnedAt = performance.now();
-        this.instruction = '타겟으로 이동!';
+        this.stats = { hits: 0, times: [], travel: [] };
+        this._spawnTarget(p, 0.3, 0.5); // spawnedAt은 첫 update에서 게임 시계 기준으로 기록
+        this.instruction = '타겟이 나타나면 바로 출발!';
         break;
       default: // free
         this.timeLeft = 0;
@@ -217,19 +217,24 @@ export class Game {
         break;
       }
       case 'reaction': {
+        const t = this.targets[0];
+        if (t && !t.spawnedAt) t.spawnedAt = now;
+        // 반응 시간 = 타겟 출현 후 퍽이 처음 움직이기 시작할 때까지 (이동 시간과 분리)
+        if (t && !t.movedAt && tracked && puck.speed > 0.4) t.movedAt = now;
         if (pp && tracked) {
           this._checkTargets(pp, (t) => {
-            const rt = (now - t.spawnedAt) / 1000;
-            this.stats.times.push(rt); this.stats.hits++;
-            this.score += Math.max(1, Math.round(10 - rt * 3));
-            this._pop(t.x, t.y, `${rt.toFixed(2)}s`, '#22c55e');
+            const total = (now - t.spawnedAt) / 1000;
+            const rt = ((t.movedAt || now) - t.spawnedAt) / 1000;
+            this.stats.times.push(rt); this.stats.travel.push(total - rt); this.stats.hits++;
+            this.score += Math.max(1, Math.round(10 - rt * 8));
+            this._pop(t.x, t.y, `반응 ${rt.toFixed(2)}s`, '#22c55e');
             this.sfx?.target();
             this.targets = [];
-            this.nextSpawn = now + 450;
+            this.nextSpawn = now + rand(500, 1400); // 예측 못 하게 랜덤 지연
           });
         }
         if (!this.targets.length && this.nextSpawn && now >= this.nextSpawn) {
-          this._spawnTarget(pp || { x: 0.5, y: 0.5 }, 0.3);
+          this._spawnTarget(pp || { x: 0.5, y: 0.5 }, 0.3, 0.5);
           this.targets[0].spawnedAt = now;
           this.nextSpawn = 0;
         }
@@ -245,12 +250,12 @@ export class Game {
   // ---------- 내부 ----------
   _spawnCone(avoid, d, moving) {
     for (let tries = 0; tries < 40; tries++) {
-      const c = { x: rand(0.12, 0.88), y: rand(0.15, 0.85), r: CONE_R, moving, hitUntil: 0 };
+      const c = { x: rand(0.05, 0.95), y: rand(0.08, 0.92), r: CONE_R, moving, hitUntil: 0 };
       if (dist(c, avoid) < 0.22) continue;
       if (this.cones.some((o) => dist(o, c) < 0.17)) continue;
       if (this.targets.some((t) => dist(t, c) < 0.2)) continue;
       if (moving) {
-        c.baseX = Math.min(0.75, Math.max(0.25, c.x));
+        c.baseX = Math.min(0.8, Math.max(0.2, c.x));
         c.amp = rand(0.1, 0.2); c.phase = rand(0, Math.PI * 2);
         c.speed = d.speed * rand(0.8, 1.3) / 0.16;
       }
@@ -259,10 +264,11 @@ export class Game {
     }
   }
 
-  _spawnTarget(avoid, minDist = 0.25) {
-    for (let tries = 0; tries < 60; tries++) {
+  _spawnTarget(avoid, minDist = 0.25, maxDist = Infinity) {
+    for (let tries = 0; tries < 80; tries++) {
       const t = { x: rand(0.12, 0.88), y: rand(0.15, 0.85), r: TARGET_R, born: performance.now() };
-      if (dist(t, avoid) < minDist) continue;
+      const dd = dist(t, avoid);
+      if (dd < minDist || dd > maxDist) continue;
       if (this.cones.some((c) => dist(c, t) < c.r + t.r + 0.04)) continue;
       this.targets = [t];
       return;
@@ -312,13 +318,17 @@ export class Game {
         r.items = [['터치 수', s.touches], ['초당 터치', (s.touches / Math.max(1, this.elapsed)).toFixed(2)]];
         break;
       case 'reaction': {
-        const avg = s.times.length ? s.times.reduce((a, b) => a + b, 0) / s.times.length : 0;
+        const mean = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
         const best = s.times.length ? Math.min(...s.times) : 0;
-        r.items = [['점수', this.score], ['타겟 성공', s.hits], ['평균 반응', `${avg.toFixed(2)}s`], ['최고 반응', `${best.toFixed(2)}s`]];
+        r.items = [['점수', this.score], ['타겟 성공', s.hits], ['평균 반응', `${mean(s.times).toFixed(2)}s`], ['최고 반응', `${best.toFixed(2)}s`], ['평균 이동', `${mean(s.travel).toFixed(2)}s`]];
         break;
       }
       default:
         r.items = [['터치(방향 전환)', s.touches || 0], ['이동 거리', `${(s.distance || 0).toFixed(1)} 바닥폭`], ['연습 시간', `${Math.round(this.elapsed)}s`]];
+    }
+    if (this.tracker?.frames) {
+      r.trackRate = this.tracker.trackRate;
+      r.items.push(['퍽 추적률', `${Math.round(r.trackRate * 100)}%`]);
     }
     return r;
   }

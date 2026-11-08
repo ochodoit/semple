@@ -16,9 +16,13 @@ export class Tracker {
     this.dirX = 0;
     this.touches = 0;
     this.distance = 0;        // 누적 이동 거리 (바닥폭 단위)
+    this.frames = 0;          // 추적률 계산용
+    this.trackedFrames = 0;
   }
 
-  resetStats() { this.touches = 0; this.distance = 0; this.dirX = 0; }
+  resetStats() { this.touches = 0; this.distance = 0; this.dirX = 0; this.frames = 0; this.trackedFrames = 0; }
+
+  get trackRate() { return this.frames ? this.trackedFrames / this.frames : 0; }
 
   /** meas: {u,v} | null, now: ms */
   update(meas, now) {
@@ -54,6 +58,8 @@ export class Tracker {
     }
 
     this.speed = Math.hypot(this.vel.x, this.vel.y);
+    this.frames++;
+    if (this.state === 'tracked') this.trackedFrames++;
 
     // 드리블(좌우 방향 전환) 카운트
     if (this.state === 'tracked') {
