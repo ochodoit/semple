@@ -1,0 +1,17 @@
+{
+  "name": "퍽 드리블 트레이너",
+  "short_name": "퍽 드리블",
+  "description": "카메라로 바닥·스틱·퍽을 인식하는 아이스하키 스틱핸들링 트레이닝 게임",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "lang": "ko",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

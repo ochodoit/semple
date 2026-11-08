@@ -1,0 +1,141 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>vision harness</title></head>
+<body>
+<canvas id="scene" width="640" height="480"></canvas>
+<script type="module">
+  import { Vision } from '../src/vision.js';
+  import { Tracker } from '../src/tracker.js';
+  import { Game } from '../src/game.js';
+
+  const scene = document.getElementById('scene');
+  const sctx = scene.getContext('2d');
+
+  // 합성 장면: 회색 배경 + 흰 바닥 사각형(원근) + 검정 퍽 + 주황 스틱 블레이드 + 어두운 신발(노이즈)
+  function drawScene({ puck, stick, shoe }) {
+    sctx.fillStyle = '#6b7280'; sctx.fillRect(0, 0, 640, 480);
+    sctx.fillStyle = '#f3f4f6';
+    sctx.beginPath(); sctx.moveTo(120, 120); sctx.lineTo(520, 120); sctx.lineTo(600, 440); sctx.lineTo(40, 440); sctx.closePath(); sctx.fill();
+    // 바닥 음영
+    sctx.fillStyle = 'rgba(0,0,0,0.08)'; sctx.fillRect(40, 300, 560, 140);
+    if (shoe) { sctx.fillStyle = '#1f2937'; sctx.fillRect(shoe.x, shoe.y, 60, 28); }
+    if (stick) {
+      sctx.strokeStyle = '#f97316'; sctx.lineWidth = 10; sctx.lineCap = 'round';
+      sctx.beginPath(); sctx.moveTo(stick.x, stick.y); sctx.lineTo(stick.x + 40, stick.y - 6); sctx.stroke();
+    }
+    if (puck) { sctx.fillStyle = '#111827'; sctx.beginPath(); sctx.ellipse(puck.x, puck.y, 14, 9, 0, 0, Math.PI * 2); sctx.fill(); }
+  }
+
+  const settings = {
+    whiteV: 150, whiteC: 55, puckTol: 95, stickTol: 70,
+    puckModel: { r: 0, g: 0, b: 0, area: 0 }, stickModel: null,
+    floorMode: 'auto', manualQuad: null, debug: false,
+  };
+
+  window.runTests = async () => {
+    const out = { ok: true, logs: [], errors: [] };
+    const check = (name, cond, detail) => { out.logs.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' ' + JSON.stringify(detail) : ''}`); if (!cond) out.ok = false; };
+
+    const vision = new Vision(240);
+    vision.mirror = false;
+    vision.setSourceSize(640, 480);
+
+    // 1) 바닥 + 퍽 감지 (여러 프레임 돌려 EMA 안정화)
+    drawScene({ puck: { x: 320, y: 300 }, stick: null, shoe: null });
+    let r;
+    for (let i = 0; i < 12; i++) r = vision.process(scene, settings);
+    check('floor detected', r.floor.detected && !!r.floor.mapping);
+    const q = r.floor.quad;
+    check('floor bbox plausible', q && q[0][0] < 240 * 0.12 && q[1][0] > 240 * 0.85 && q[0][1] > 240 * 0.2 * 0.75 && q[2][1] > 240 * 0.68, q);
+    check('puck detected', !!r.puck, r.puck);
+    // 퍽 위치: 640x480 -> 240x180 배율 0.375
+    check('puck position', r.puck && Math.abs(r.puck.x - 320 * 0.375) < 2 && Math.abs(r.puck.y - 300 * 0.375) < 2, r.puck && [r.puck.x, r.puck.y]);
+
+    // 2) 스틱 보정 (주황 테이프 터치) + 추적
+    drawScene({ puck: { x: 300, y: 320 }, stick: { x: 340, y: 300 }, shoe: null });
+    r = vision.process(scene, settings);
+    const sample = vision.sampleObject(360 * 0.375, 297 * 0.375, settings.stickTol);
+    check('stick sample is orange', sample && sample.r > 200 && sample.g > 80 && sample.g < 160 && sample.b < 80, sample);
+    check('stick sample not floor-like', sample && !vision.isFloorLike(sample, settings));
+    settings.stickModel = { ...sample };
+    r = vision.process(scene, settings);
+    check('stick detected', !!r.stick, r.stick);
+    check('stick position', r.stick && Math.abs(r.stick.x - 360 * 0.375) < 4 && Math.abs(r.stick.y - 297 * 0.375) < 4, r.stick && [r.stick.x, r.stick.y]);
+    check('puck still detected with stick', !!r.puck && Math.abs(r.puck.x - 300 * 0.375) < 2, r.puck);
+
+    // 3) 퍽 보정 (검정 퍽 터치) -> 면적 학습
+    const ps = vision.sampleObject(300 * 0.375, 320 * 0.375, settings.puckTol);
+    check('puck sample dark', ps && ps.r < 40 && ps.area > 10 && ps.area < 120, ps);
+    settings.puckModel = { ...ps };
+
+    // 4) 큰 어두운 물체(신발)가 있어도 퍽 선택
+    drawScene({ puck: { x: 420, y: 350 }, stick: { x: 340, y: 300 }, shoe: { x: 200, y: 380 } });
+    r = vision.process(scene, settings);
+    check('puck chosen over shoe', r.puck && Math.abs(r.puck.x - 420 * 0.375) < 2, { puck: r.puck && [r.puck.x, r.puck.y], cands: r.puckCandidates.map((c) => [c.area, +c.score.toFixed(2)]) });
+
+    // 5) 흰색 샘플은 거부
+    const ws = vision.sampleObject(320 * 0.375, 200 * 0.375, 70);
+    check('white sample flagged floor-like', ws && vision.isFloorLike(ws, settings), ws);
+
+    // 6) 트래커 + 게임: 퍽이 좌우로 움직이면 터치 카운트 증가, 와이드 모드 반복 증가
+    const tracker = new Tracker();
+    const game = new Game(null);
+    game.setMode('wide');
+    let now = 1000;
+    for (let i = 0; i < 10; i++) { drawScene({ puck: { x: 320, y: 300 } }); r = vision.process(scene, settings); const [u, v] = r.floor.mapping.toUV(r.puck.x, r.puck.y); tracker.update({ u, v }, now); now += 33; }
+    game.start(tracker);
+    let lastU = null;
+    for (let t = 0; t < 240; t++) {
+      const x = 320 + Math.sin(t / 8) * 230;  // 좌우 왕복 (약 1.65초 주기)
+      drawScene({ puck: { x, y: 300 } });
+      r = vision.process(scene, settings);
+      let meas = null;
+      if (r.puck) { const [u, v] = r.floor.mapping.toUV(r.puck.x, r.puck.y); meas = { u, v }; lastU = u; }
+      tracker.update(meas, now);
+      game.update(0.033, tracker, now);
+      now += 33;
+    }
+    check('tracker counts touches', tracker.touches >= 6, { touches: tracker.touches, lastU });
+    check('wide drill counts reps', game.stats.reps >= 6, game.stats);
+    check('timer runs down', game.timeLeft < 30 && game.timeLeft > 20, game.timeLeft);
+    const result = game.stop('manual');
+    check('result built', result && result.items.length === 2, result && result.items);
+
+    // 7) 장애물 모드: 타겟 위치로 퍽 이동 시 점수 증가, 콘 충돌 시 생명 감소
+    game.setMode('obstacle');
+    game.difficulty = 'normal';
+    game.start(tracker);
+    const target = game.targets[0];
+    tracker.pos = { x: target.x, y: target.y }; tracker.state = 'tracked';
+    game.update(0.033, tracker, now); now += 33;
+    check('obstacle target scores', game.score === 10 && game.stats.targets === 1, { score: game.score });
+    const cone = game.cones[0];
+    tracker.pos = { x: cone.x, y: cone.y };
+    game.update(0.033, tracker, now); now += 33;
+    check('cone hit costs life', game.lives === 2 && game.stats.hits === 1, { lives: game.lives });
+    game.update(0.033, tracker, now); now += 33;
+    check('invulnerability after hit', game.lives === 2);
+    game.stop('manual');
+
+    // 8) 수동 바닥 모드 + 거울
+    settings.floorMode = 'manual';
+    settings.manualQuad = [[0.2, 0.25], [0.8, 0.25], [0.95, 0.92], [0.05, 0.92]];
+    vision.mirror = true;
+    drawScene({ puck: { x: 200, y: 300 } });
+    r = vision.process(scene, settings);
+    check('manual floor mapping', !!r.floor.mapping && r.floor.mode === 'manual');
+    check('mirrored puck x', r.puck && Math.abs(r.puck.x - (640 - 200) * 0.375) < 2, r.puck && r.puck.x);
+    const [u, v] = r.floor.mapping.toUV(r.puck.x, r.puck.y);
+    const [bx, by] = r.floor.mapping.toPx(u, v);
+    check('homography roundtrip', Math.abs(bx - r.puck.x) < 1e-6 && Math.abs(by - r.puck.y) < 1e-6);
+
+    // 9) 성능: 240x180 프레임 처리 시간
+    settings.debug = true;
+    const t0 = performance.now();
+    for (let i = 0; i < 60; i++) vision.process(scene, settings);
+    const ms = (performance.now() - t0) / 60;
+    out.logs.push(`INFO avg process time ${ms.toFixed(2)} ms/frame (debug on)`);
+    check('debug image built', !!vision.debugImage);
+    return out;
+  };
+</script>
+</body></html>

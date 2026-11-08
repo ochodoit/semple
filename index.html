@@ -1,14 +1,183 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hello World</title>
-  <link href='/style.css' rel='stylesheet'>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="퍽 드리블" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <title>퍽 드리블 트레이너</title>
+  <link href="style.css" rel="stylesheet" />
 </head>
 <body>
-  <h1>Hello, world!</h1>
-  <button onclick="console.log('hello');">Press me</button>
-  <script defer type="text/javascript" src="/main.js"></script>
+  <main id="app">
+    <!-- 카메라 영상 + 오버레이 -->
+    <section id="stage">
+      <div id="view" class="view">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="overlay"></canvas>
+        <canvas id="debug" class="hidden"></canvas>
+        <div id="floor-handles" class="hidden">
+          <button class="handle" data-i="0" aria-label="좌상단 모서리"></button>
+          <button class="handle" data-i="1" aria-label="우상단 모서리"></button>
+          <button class="handle" data-i="2" aria-label="우하단 모서리"></button>
+          <button class="handle" data-i="3" aria-label="좌하단 모서리"></button>
+        </div>
+        <div id="tap-hint" class="tap-hint hidden"></div>
+      </div>
+
+      <!-- 상단 HUD -->
+      <header id="hud" class="hud">
+        <div class="hud-left">
+          <span id="hud-mode" class="hud-mode">자유 연습</span>
+          <span id="hud-instruction" class="hud-instruction"></span>
+        </div>
+        <div class="hud-center">
+          <span id="hud-timer" class="hud-timer">--</span>
+        </div>
+        <div class="hud-right">
+          <span id="hud-score" class="hud-score">0</span>
+          <span id="hud-lives" class="hud-lives"></span>
+        </div>
+      </header>
+
+      <!-- 인식 상태 -->
+      <div id="status" class="status">
+        <span class="chip" id="chip-floor"><i></i>바닥</span>
+        <span class="chip" id="chip-puck"><i></i>퍽</span>
+        <span class="chip" id="chip-stick"><i></i>스틱</span>
+        <span class="chip chip-fps" id="chip-fps">-- fps</span>
+      </div>
+
+      <!-- 하단 컨트롤 -->
+      <nav id="controls" class="controls">
+        <button id="btn-mode" class="btn">모드</button>
+        <button id="btn-floor-lock" class="btn">바닥 고정</button>
+        <button id="btn-calib" class="btn">보정</button>
+        <button id="btn-settings" class="btn">설정</button>
+        <button id="btn-start" class="btn btn-primary">시작</button>
+      </nav>
+    </section>
+
+    <!-- 시작 화면 -->
+    <div id="splash" class="panel splash">
+      <div class="splash-inner">
+        <div class="logo">🏒</div>
+        <h1>퍽 드리블 트레이너</h1>
+        <p>아이패드 카메라로 흰 바닥·스틱·퍽을 실시간으로 인식해 장애물 피하기와 드리블 훈련을 진행합니다.</p>
+        <ol class="tips">
+          <li>아이패드를 거치대에 세워 흰 바닥(연습판)이 화면에 가득 차도록 비춥니다.</li>
+          <li>퍽은 기본 검정색으로 인식됩니다. 스틱은 블레이드에 <b>눈에 띄는 색 테이프</b>를 감으면 가장 잘 인식됩니다.</li>
+          <li>시작 후 <b>보정</b>에서 퍽과 스틱을 화면에서 터치해 색을 지정하세요.</li>
+        </ol>
+        <button id="btn-camera" class="btn btn-primary btn-big">카메라 시작</button>
+        <p id="splash-error" class="error hidden"></p>
+      </div>
+    </div>
+
+    <!-- 모드 선택 -->
+    <div id="panel-mode" class="panel modal hidden">
+      <div class="modal-card">
+        <header><h2>모드 선택</h2><button class="btn btn-ghost btn-close" data-close="panel-mode">닫기</button></header>
+        <div id="mode-list" class="mode-list"></div>
+        <div class="versus-row">
+          <label class="switch"><input type="checkbox" id="versus-toggle" /><span>2인 대결 (번갈아 플레이)</span></label>
+          <div id="versus-names" class="versus-names hidden">
+            <input id="p1-name" type="text" maxlength="10" placeholder="플레이어 1" value="플레이어 1" />
+            <input id="p2-name" type="text" maxlength="10" placeholder="플레이어 2" value="플레이어 2" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 설정 -->
+    <div id="panel-settings" class="panel modal hidden">
+      <div class="modal-card">
+        <header><h2>설정</h2><button class="btn btn-ghost btn-close" data-close="panel-settings">닫기</button></header>
+        <div class="settings-grid">
+          <label>카메라
+            <select id="sel-camera"></select>
+          </label>
+          <label class="switch"><input type="checkbox" id="set-mirror" checked /><span>좌우 반전(거울 모드)</span></label>
+          <label class="switch"><input type="checkbox" id="set-debug" /><span>인식 마스크 표시(디버그)</span></label>
+          <label class="switch"><input type="checkbox" id="set-sound" checked /><span>효과음</span></label>
+
+          <label>바닥 밝기 기준 <output id="out-whiteV"></output>
+            <input type="range" id="set-whiteV" min="80" max="240" step="1" />
+          </label>
+          <label>바닥 채도 허용 <output id="out-whiteC"></output>
+            <input type="range" id="set-whiteC" min="10" max="120" step="1" />
+          </label>
+          <label>퍽 색 허용 오차 <output id="out-puckTol"></output>
+            <input type="range" id="set-puckTol" min="20" max="200" step="1" />
+          </label>
+          <label>스틱 색 허용 오차 <output id="out-stickTol"></output>
+            <input type="range" id="set-stickTol" min="20" max="200" step="1" />
+          </label>
+          <label>바닥 영역
+            <select id="set-floorMode">
+              <option value="auto">자동 감지(흰색 영역)</option>
+              <option value="manual">수동 지정(모서리 드래그)</option>
+            </select>
+          </label>
+          <label>난이도
+            <select id="set-difficulty">
+              <option value="easy">쉬움</option>
+              <option value="normal" selected>보통</option>
+              <option value="hard">어려움</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <button id="btn-reset-settings" class="btn btn-ghost">설정 초기화</button>
+          <button id="btn-reset-scores" class="btn btn-ghost">기록 초기화</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 보정 -->
+    <div id="panel-calib" class="panel modal hidden">
+      <div class="modal-card">
+        <header><h2>인식 보정</h2><button class="btn btn-ghost btn-close" data-close="panel-calib">닫기</button></header>
+        <p class="muted">물체를 바닥 위에 놓고 버튼을 누른 뒤, 화면에서 해당 물체를 정확히 터치하세요. 색과 크기를 자동으로 학습합니다.</p>
+        <div class="calib-grid">
+          <div class="calib-item">
+            <span class="swatch" id="swatch-puck"></span>
+            <div><b>퍽</b><small id="calib-puck-desc">기본: 검정</small></div>
+            <button class="btn" data-calib="puck">터치로 지정</button>
+            <button class="btn btn-ghost" data-calib-reset="puck">기본값</button>
+          </div>
+          <div class="calib-item">
+            <span class="swatch" id="swatch-stick"></span>
+            <div><b>스틱(블레이드/테이프)</b><small id="calib-stick-desc">미지정</small></div>
+            <button class="btn" data-calib="stick">터치로 지정</button>
+            <button class="btn btn-ghost" data-calib-reset="stick">해제</button>
+          </div>
+        </div>
+        <p class="muted">팁: 스틱 테이프와 퍽의 색이 같으면(둘 다 검정) 서로 붙었을 때 잠시 구분이 어려워집니다. 주황·파랑 등 바닥과 퍽 모두와 다른 색을 추천합니다.</p>
+      </div>
+    </div>
+
+    <!-- 결과 -->
+    <div id="panel-result" class="panel modal hidden">
+      <div class="modal-card">
+        <header><h2 id="result-title">결과</h2><button class="btn btn-ghost btn-close" data-close="panel-result">닫기</button></header>
+        <div id="result-body" class="result-body"></div>
+        <div class="row">
+          <button id="btn-result-again" class="btn btn-primary">다시 하기</button>
+          <button id="btn-result-next" class="btn btn-primary hidden">다음 플레이어</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </main>
+
+  <script type="module" src="src/main.js"></script>
 </body>
 </html>
